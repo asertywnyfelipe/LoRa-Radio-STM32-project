@@ -64,6 +64,8 @@ void Error_Handler(void);
 #define SPI_interrupt_Pin GPIO_PIN_2
 #define SPI_interrupt_GPIO_Port GPIOB
 #define SPI_interrupt_EXTI_IRQn EXTI2_IRQn
+#define D_callback_orange_Pin GPIO_PIN_13
+#define D_callback_orange_GPIO_Port GPIOD
 
 /* USER CODE BEGIN Private defines */
 

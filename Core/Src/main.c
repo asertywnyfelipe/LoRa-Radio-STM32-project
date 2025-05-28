@@ -22,6 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "core_cm4.h"  // lub core_cm3.h/core_cm7.h zależnie od MCU
+#include <stdbool.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +53,23 @@
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
+
+//USER HELP VARIABLES and debugging functions
+const bool BOOL_Log_1 = true;
+const bool BOOL_Log_0 = false;
+
+bool my_bit = false;
+void ToggleBit(void) {
+    my_bit = !my_bit;
+}
+
+
+int _write(int file, char *ptr, int len) {
+    for (int i = 0; i < len; i++) {
+        ITM_SendChar(ptr[i]); // Wysyłanie znaków do kanału 0 SWV
+    }
+    return len;
+}
 
 /* USER CODE END PV */
 
@@ -107,84 +127,126 @@ uint8_t LoRa_ReadRegister(uint8_t reg) {
 
 void LoRa_Init(void) {
     LoRa_Reset();
+    HAL_Delay(200);
 
     uint8_t version = LoRa_ReadRegister(0x42);
     if (version != 0x12) {
-        // Błąd - moduł nie odpowiada poprawnie
+
+    	// Błąd - moduł nie odpowiada poprawnie
+    	 for (int i = 0; i < 5; i++) {
+    		        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);   // zapal diodę
+    	            HAL_Delay(200);
+    	            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET); // zgaś diodę
+    	            HAL_Delay(200);
+    	 }
+    	 HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
         while(1);
     }
 
-    // Ustaw tryb sleep aby konfigurować
-    LoRa_WriteRegister(0x01, 0x00); // RegOpMode = sleep, LoRa mode enabled (bit7=1)
+    // Sleep + LoRa mode enabled (bit7=1)
+    LoRa_WriteRegister(0x01, 0x80);
 
-    // Ustaw częstotliwość (np. 433 MHz)
-    // Freq = 433000000 Hz, Fstep = 61.035 Hz, RegFrMsb = freq / Fstep >> 16 itd.
-    uint32_t frf = (uint32_t)((433000000.0) / 61.03515625);
-    LoRa_WriteRegister(0x06, (frf >> 16) & 0xFF);
-    LoRa_WriteRegister(0x07, (frf >> 8) & 0xFF);
-    LoRa_WriteRegister(0x08, frf & 0xFF);
+    // Dla 433.125 MHz
+    uint32_t frf = (uint32_t)(433125000.0 / 61.03515625); // = 7094272 ≈ 0x6C40A0
 
-    // Konfiguracja modułu
-    LoRa_WriteRegister(0x09, 0xFF); // RegPaConfig max power
-    LoRa_WriteRegister(0x0A, 0x23); // RegOcp (prąd ochrony)
-    LoRa_WriteRegister(0x0B, 0x07); // LNA gain max
+    LoRa_WriteRegister(0x06, (frf >> 16) & 0xFF); // 0x6C
+    LoRa_WriteRegister(0x07, (frf >> 8) & 0xFF);  // 0x40
+    LoRa_WriteRegister(0x08, frf & 0xFF);         // 0xA0
 
-    // Ustaw parametry modulatora (Bandwidth, CodingRate, SpreadingFactor)
-    LoRa_WriteRegister(0x1D, 0x72); // RegModemConfig1 (BW=125kHz, CR=4/5)
-    LoRa_WriteRegister(0x1E, 0x74); // RegModemConfig2 (SF=7, CRC enabled)
+    // PA config - max power
+    LoRa_WriteRegister(0x09, 0x4F);
 
-    LoRa_WriteRegister(0x26, 0x04); // RegModemConfig3 (LowDataRateOptimize off, AGC auto on)
+    // Ochrona prądu
+    LoRa_WriteRegister(0x0A, 0x23);
 
-    // Ustaw adres FIFO do Tx i Rx
-    LoRa_WriteRegister(0x0F, 0x00); // RegFifoTxBaseAddr
-    LoRa_WriteRegister(0x0E, 0x00); // RegFifoRxBaseAddr
+    // LNA gain max
+    LoRa_WriteRegister(0x0B, 0x07);
 
-    // Ustaw tryb RX Continuous
-    LoRa_WriteRegister(0x01, 0x85); // RegOpMode = LoRa mode, RX continuous
+    // Modem config
+    LoRa_WriteRegister(0x1D, 0x72); // ModemConfig1: BW=125, CR=4/5
+    LoRa_WriteRegister(0x1E, 0x94); // ModemConfig2: SF=9, CRC on
+    LoRa_WriteRegister(0x26, 0x04); // ModemConfig3: LowDataRateOptimize = off
 
-    // Wyczyść przerwania
+    printf("ModemConfig1: 0x%02X\n", LoRa_ReadRegister(0x1D));
+    printf("ModemConfig2: 0x%02X\n", LoRa_ReadRegister(0x1E));
+    printf("ModemConfig3: 0x%02X\n", LoRa_ReadRegister(0x26));
+
+
+    // FIFO base address: Tx i Rx poprawnie!
+    LoRa_WriteRegister(0x0E, 0x00); // RegFifoTxBaseAddr
+    LoRa_WriteRegister(0x0F, 0x00); // RegFifoRxBaseAddr
+
+    // Tryb RX continuous
+    LoRa_WriteRegister(0x01, 0x85); // LoRa mode, RX continuous
+
+    // Wyczyść IRQ
     LoRa_WriteRegister(0x12, 0xFF);
 }
 
 void LoRa_SendText(const char *text) {
-    uint8_t len = strlen(text);
-    if (len > 255) len = 255; // max pakiet
 
-    // Ustaw tryb standby
-    LoRa_WriteRegister(0x01, 0x81); // LoRa mode, standby
+	// 1. Wyczyść flagi IRQ
+    LoRa_WriteRegister(0x12, 0xFF);
 
-    // Ustaw wskaźnik FIFO na start transmisji
-    LoRa_WriteRegister(0x0D, 0x00); // RegFifoAddrPtr
+    // 1. Ustaw FIFO base addr na 0
+    LoRa_WriteRegister(0x0E, 0x00);
+    LoRa_WriteRegister(0x0D, 0x00);
 
-    // Zapisz bajty do FIFO
-    for (uint8_t i = 0; i < len; i++) {
-        LoRa_WriteRegister(0x00, text[i]);
+    // 3. Załaduj dane do FIFO
+    LoRa_Select();
+    LoRa_SPI_ReadWrite(0x80); // FIFO address with write bit
+
+
+    printf("parametry przed petla for  do wpisywania do fifo\n");
+       LoRa_DumpRegisters();
+
+    for (uint8_t i = 0; i < strlen(text); i++) {
+        LoRa_SPI_ReadWrite(text[i]);
     }
+    LoRa_Unselect();
 
-    // Ustaw długość pakietu
-    LoRa_WriteRegister(0x22, len);
+    // 4. Ustaw długość wiadomości
+    LoRa_WriteRegister(0x22, strlen(text)); // RegPayloadLength
 
-    // Włącz TX
-    LoRa_WriteRegister(0x01, 0x83); // LoRa mode, TX
+    // 5. Tryb TX (LoRa mode, FSK off, TX on)
+    LoRa_WriteRegister(0x01, 0x83); // RegOpMode: LoRa, TX mode
 
-    // Czekaj na przerwanie TX done w DIO0
-    while (HAL_GPIO_ReadPin(LORA_DIO0_GPIO_Port, LORA_DIO0_Pin) == GPIO_PIN_RESET);
+    printf("OpMode=0x%02X, IrqFlags=0x%02X, PayloadLen=%d\r\n",
+           LoRa_ReadRegister(0x01),
+           LoRa_ReadRegister(0x12),
+           LoRa_ReadRegister(0x22));
 
-    // Wyczyść flagi przerwań TX done
-    LoRa_WriteRegister(0x12, 0x08);
+    printf("parametry przed petla while - sprawdzeniem czy tx done\n");
+    LoRa_DumpRegisters();
 
-    // Powrót do RX continuous
-    LoRa_WriteRegister(0x01, 0x85);
+
+    // 6. Czekaj na zakończenie transmisji
+    while ((LoRa_ReadRegister(0x12) & 0x08) == 0) // TX_DONE = 0x08
+    {
+    	printf("Still waiting... Irq=0x%02X\r\n", LoRa_ReadRegister(0x12));
+    	LoRa_DumpRegisters();
+    	HAL_Delay(2000);
+    };
+
+
+    // 🐞 DEBUG: potwierdzenie zakończenia
+    printf("TX done: Irq=0x%02X\r\n", LoRa_ReadRegister(0x12));
+
+    for (int i = 0; i < 2; i++) {
+       		        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);   // zapal diodę
+       	            HAL_Delay(200);
+       	            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET); // zgaś diodę
+       	            HAL_Delay(200);
+       	 }
+
+    HAL_Delay(400);
+
+    // 7. Wyczyść flagi IRQ
+    LoRa_WriteRegister(0x12, 0xFF);
+
+    // 8. Tryb RX (powrót)
+    LoRa_WriteRegister(0x01, 0x85); // RX_CONTINUOUS
 }
-
-//// Prosty test odczytu wersji SX1278 (powinien zwrócić 0x12) -> zmiana na spi zamiast huart
-//void LoRa_TestVersion(void) {
-//    uint8_t version = LoRa_ReadRegister(0x42); // RegVersion
-//    char msg[32];
-//    sprintf(msg, "SX1278 Ver: 0x%02X\r\n", version);
-//    HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-//}
-
 
 int LoRa_ReceiveText(char *buffer, int max_len) {
     uint8_t irqFlags = LoRa_ReadRegister(0x12);
@@ -219,28 +281,65 @@ int LoRa_ReceiveText(char *buffer, int max_len) {
     return 0;
 }
 
+void LoRa_ReportEvent(void) {
+    uint8_t irqFlags = LoRa_ReadRegister(0x12);   // RegIrqFlags
+    LoRa_WriteRegister(0x12, 0xFF);               // Skasuj flagi (1 = clear)
+
+    if (irqFlags & (1 << 6)) {
+        LoRa_SendText("CRC ERROR\r\n");
+    } else if (irqFlags & (1 << 3)) {
+        LoRa_SendText("RX DONE\r\n");
+    } else if (irqFlags & (1 << 0)) {
+        LoRa_SendText("TX DONE\r\n");
+    } else {
+        char msg[32];
+        sprintf(msg, "IRQ Unknown: 0x%02X\r\n", irqFlags);
+        LoRa_SendText(msg);
+    }
+}
+
 volatile uint8_t flag_error = 0;
 volatile uint8_t flag_rx_done = 0;
+volatile uint8_t lora_event_flag = 0;
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+	int HUL_TEST = 1;
     if (GPIO_Pin == SPI_interrupt_Pin) { // przerwanie od SX1278
         uint8_t irqFlags = LoRa_ReadRegister(0x12);
 
         if (irqFlags & 0x20) {  // CRC error
             flag_error = 1;
-        //    HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_RESET); // zapal diodę
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET); // zapal diodę
             // wysyłamy komunikat radiowy informujący o błędzie (jednorazowo)
             LoRa_SendText("ERROR: CRC");
         } else if (irqFlags & 0x40) { // Rx done
             flag_rx_done = 1;
-        //    HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_SET); // zgaś diodę
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET); // zgaś diodę
             // opcjonalnie potwierdzenie odebrania
             LoRa_SendText("RX_DONE");
         }
 
         LoRa_WriteRegister(0x12, 0xFF); // czyścimy przerwania
     }
+}
+
+uint8_t reg_values[15];
+
+void LoRa_DumpRegisters() {
+    printf("Version: 0x%02X\n", LoRa_ReadRegister(0x42));
+    printf("OpMode: 0x%02X\n", LoRa_ReadRegister(0x01));
+    printf("RegFifoAddrPtr: 0x%02X\n", LoRa_ReadRegister(0x0D));
+    printf("RegFifoTxBaseAddr: 0x%02X\n", LoRa_ReadRegister(0x0E));
+    printf("RegPayloadLength: %d\n", LoRa_ReadRegister(0x22));
+    printf("RegModemConfig1: 0x%02X\n", LoRa_ReadRegister(0x1D));
+    printf("RegModemConfig2: 0x%02X\n", LoRa_ReadRegister(0x1E));
+    printf("RegModemConfig3: 0x%02X\n", LoRa_ReadRegister(0x26));
+    printf("Freq (MSB): 0x%02X\n", LoRa_ReadRegister(0x06));
+    printf("Freq (MID): 0x%02X\n", LoRa_ReadRegister(0x07));
+    printf("Freq (LSB): 0x%02X\n", LoRa_ReadRegister(0x08));
+    printf("PaConfig: 0x%02X\n", LoRa_ReadRegister(0x09));
+    printf("IrqFlags: 0x%02X\n", LoRa_ReadRegister(0x12));
 }
 
 
@@ -278,35 +377,48 @@ int main(void)
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
 
+  LoRa_Init();  // konfigurujesz po resecie, nie przed
+
+
+  LoRa_DumpRegisters();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+//  LoRa_DumpRegisters();
+
   while (1)
   {
 
+	  if (lora_event_flag) {
+	      lora_event_flag = 0;
+	      LoRa_ReportEvent();  // odczytaj rejestr i wyślij informację do PC
+	  }
 
-	    if (flag_error) {
-	            flag_error = 0;
-	            // obsługa błędu — np. logowanie, powiadomienie na konsoli UART
-	            UART_Printf("Błąd CRC w pakiecie LoRa!\r\n");
-	            // ewentualnie reset lub inne działania
-	        }
-	        if (flag_rx_done) {
-	            flag_rx_done = 0;
-	            // obsługa odebranych danych
-	            char buf[256];
-	            int len = LoRa_ReceiveText(buf, sizeof(buf));
-	            if (len > 0) {
-	                UART_Printf("Odebrano: %s\r\n", buf);
-	            }
-	        }
+//	  static uint32_t last_send = 0;
+//	         if (HAL_GetTick() - last_send > 10000) {
+//	             LoRa_SendText("MENU:\r\n1.Status\r\n2.Config\r\n3.Reset\r\nWpisz nr opcji:\r\n");
+//	             last_send = HAL_GetTick();
 
-	  static uint32_t last_send = 0;
-	         if (HAL_GetTick() - last_send > 10000) {
-	             LoRa_SendText("MENU:\r\n1.Status\r\n2.Config\r\n3.Reset\r\nWpisz nr opcji:\r\n");
-	             last_send = HAL_GetTick();
-	         }
+//	             for (int i = 0; i < 3; i++) {
+//	                 		        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);   // zapal diodę
+//	                 	            HAL_Delay(200);
+//	                 	            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET); // zgaś diodę
+//	                 	            HAL_Delay(200);
+	                 //	 }
+
+	        // }
+
+
+
+	   LoRa_SendText("MENU:\n");
+
+
+
+	             HAL_Delay(2000);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -378,7 +490,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -409,9 +521,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, CS_Pin|SPI_Reset_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(D_callback_orange_GPIO_Port, D_callback_orange_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : CS_Pin */
   GPIO_InitStruct.Pin = CS_Pin;
@@ -432,6 +548,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(SPI_interrupt_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : D_callback_orange_Pin */
+  GPIO_InitStruct.Pin = D_callback_orange_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(D_callback_orange_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
